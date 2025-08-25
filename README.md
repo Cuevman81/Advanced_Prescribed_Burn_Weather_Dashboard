@@ -104,4 +104,4 @@ This tool provides weather information for PLANNING PURPOSES ONLY. Forecasts are
 AUTHOR
 ------
 - Rodney Cuevas
-- Contact: RCuevas@mdeq.ms.gov
+- For questions, comments, or bug reports, please contact: RCuevas@mdeq.ms.gov
