@@ -1128,7 +1128,7 @@ server <- function(input, output, session) {
     }
     
     # Fetch forecast
-    forecast_results <- get_prescribed_burn_forecast( # Changed variable name
+    forecast_results <- get_prescribed_burn_forecast(
       geo_location$lat, 
       geo_location$long,
       days_since_rain_input = input$days_since_rain,
@@ -1139,23 +1139,30 @@ server <- function(input, output, session) {
     restrictions_info <- check_burn_restrictions(geo_location$lat, geo_location$long)
     rv_burn_restrictions(restrictions_info) 
     
-    # Check if the forecast part of the results is valid
-    if (!is.null(forecast_results) && !is.null(forecast_results$forecast)) {
-      rv_forecast_data(forecast_results$forecast) # Store the forecast dataframe
-      rv_nws_office(forecast_results$nws_office) # Store the NWS office code
-      
+    # Check if the forecast part of the results is valid AND contains data
+    if (is.data.frame(forecast_results$forecast) && nrow(forecast_results$forecast) > 0) {
+      # SUCCESS: Store all the new data
+      rv_forecast_data(forecast_results$forecast)
+      rv_nws_office(forecast_results$nws_office)
       rv_narrative_forecast(forecast_results$narrative)
       rv_fire_discussion(forecast_results$fire_discussion)
       rv_zone_forecast(forecast_results$zone_forecast)
       
-      
       removeNotification("loading")
-      # This is the line to change:
       showNotification("Data loaded. Generating plots and tables...", type = "message", duration = 4)
+      
     } else {
-      showNotification("Could not fetch weather data.", type = "error")
+      # FAILURE: Show a message AND clear all stale data
+      showNotification("Could not fetch weather data for this specific location. It may be too rural or lack detailed grid data.", type = "error", duration = 10)
       removeNotification("loading")
+      
+      rv_forecast_data(NULL)
+      rv_nws_office(NULL)
+      rv_narrative_forecast(NULL)
+      rv_fire_discussion(NULL)
+      rv_zone_forecast(NULL)
     }
+    
     # Retrieve the API key from the server environment
     airnow_key <- Sys.getenv("AIRNOW_API_KEY")
     
@@ -1169,19 +1176,17 @@ server <- function(input, output, session) {
       rv_air_quality_data(forecast_aq_results)
       
       # 3. If the first call worked, use its state code to get ALL monitors for that state
-      if (!is.null(current_aq_results) && nrow(current_aq_results) > 0) {
+      # --- THIS IS THE CRITICAL FIX ---
+      # This safely checks if we have a valid data frame with rows before proceeding.
+      if (is.data.frame(current_aq_results) && nrow(current_aq_results) > 0) {
         state_code <- current_aq_results$StateCode[1]
         statewide_monitors <- get_monitors_by_state_bbox(state_code, airnow_key)
         
-        # =================================================================
-        # ADD THESE TWO LINES FOR DEBUGGING
-        # =================================================================
         print("--- Statewide Monitor Data ---")
-        print(head(statewide_monitors)) # This shows us the column names and first few rows
+        print(head(statewide_monitors))
         
         print("--- Unique Pollutants Found ---")
-        print(unique(statewide_monitors$Parameter)) # This tells us exactly what pollutants are in the data
-        # =================================================================
+        print(unique(statewide_monitors$Parameter))
         
         rv_statewide_monitors(statewide_monitors)
       } else {
@@ -1202,7 +1207,7 @@ server <- function(input, output, session) {
   output$current_conditions_ui <- renderUI({
     df <- rv_forecast_data()
     
-    if (is.null(df)) {
+    if (is.null(df) || nrow(df) == 0) {
       return(p("Enter a location and click 'Get Forecast' to begin."))
     }
     
@@ -1268,7 +1273,7 @@ server <- function(input, output, session) {
   # Fire Indices UI
   output$fire_indices_ui <- renderUI({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     current <- df[1, ]
     
@@ -1323,7 +1328,7 @@ server <- function(input, output, session) {
   # Smoke Dispersion UI
   output$smoke_dispersion_ui <- renderUI({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     current <- df[1, ]
     
@@ -1349,7 +1354,7 @@ server <- function(input, output, session) {
   # Burn Quality Plot
   output$burn_quality_plot <- renderPlotly({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     df_24hr <- df %>% 
       head(24) %>%
@@ -1378,7 +1383,7 @@ server <- function(input, output, session) {
   # Weather Trend Plot (ENHANCED VERSION)
   output$weather_trend_plot <- renderPlotly({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     df_48hr <- df %>% head(48)
     
@@ -1475,7 +1480,7 @@ server <- function(input, output, session) {
   # --- CORRECTED to use meters directly ---
   output$forecast_table <- DT::renderDT({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     df %>%
       select(
@@ -1503,7 +1508,7 @@ server <- function(input, output, session) {
   # Burn Windows UI
   output$burn_windows_ui <- renderUI({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     # Find optimal burn windows WITH PRESCRIPTION COMPLIANCE
     df_optimal <- df %>%
@@ -1708,7 +1713,7 @@ server <- function(input, output, session) {
   # Burn Heatmap
   output$burn_heatmap <- renderPlotly({
     df <- rv_forecast_data()
-    if (is.null(df)) return(NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
     
     # Create a new data frame for the heatmap
     # Ensure the 'day' column is an ordered factor. Using rev() puts the
@@ -1920,7 +1925,7 @@ server <- function(input, output, session) {
   # Zone Forecast Header (was spot_forecast_header)
   output$zone_forecast_header <- renderUI({
     df <- rv_forecast_data()
-    if (is.null(df)) return(p("Enter a location and click 'Get Forecast' to generate the zone forecast."))
+    if (is.null(df) || nrow(df) == 0) return(p("Enter a location and click 'Get Forecast' to generate the zone forecast."))
     
     tagList(
       h4(paste("Zone Forecast for", input$location_input)),
