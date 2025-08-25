@@ -1089,6 +1089,7 @@ server <- function(input, output, session) {
   # Reactive value to store forecast data
   rv_forecast_data <- reactiveVal(NULL)
   rv_nws_office <- reactiveVal(NULL)
+  rv_state_code <- reactiveVal(NULL)
   
   # --- ADD THIS NEW REACTIVEVAL ---
   rv_narrative_forecast <- reactiveVal(NULL)
@@ -1175,22 +1176,36 @@ server <- function(input, output, session) {
       forecast_aq_results <- get_air_quality_data(geo_location$lat, geo_location$long, airnow_key)
       rv_air_quality_data(forecast_aq_results)
       
-      # 3. If the first call worked, use its state code to get ALL monitors for that state
-      # --- THIS IS THE CRITICAL FIX ---
-      # This safely checks if we have a valid data frame with rows before proceeding.
+      # 3. Get statewide monitors. This is now de-coupled from the point-specific result.
+      state_code <- NULL
+      # First, try to get state code from the specific AQI result (most reliable).
       if (is.data.frame(current_aq_results) && nrow(current_aq_results) > 0) {
         state_code <- current_aq_results$StateCode[1]
+      } else {
+        # Fallback: If the point-specific call failed, parse the state from the user's input.
+        location_parts <- strsplit(location_text, ",")[[1]]
+        if (length(location_parts) == 2) {
+          parsed_state <- trimws(location_parts[2])
+          # Simple validation: check if it's a 2-letter abbreviation.
+          if (nchar(parsed_state) == 2 && toupper(parsed_state) == parsed_state) {
+            state_code <- parsed_state
+          }
+        }
+      }
+      
+      # Now, if we successfully found a state code from ANY source, fetch the map data.
+      if (!is.null(state_code)) {
+        rv_state_code(state_code) # <-- ADD THIS LINE TO SAVE THE STATE CODE
         statewide_monitors <- get_monitors_by_state_bbox(state_code, airnow_key)
+        rv_statewide_monitors(statewide_monitors)
         
-        print("--- Statewide Monitor Data ---")
+        print("--- Statewide Monitor Data (from fallback if needed) ---")
         print(head(statewide_monitors))
         
-        print("--- Unique Pollutants Found ---")
-        print(unique(statewide_monitors$Parameter))
-        
-        rv_statewide_monitors(statewide_monitors)
       } else {
-        rv_statewide_monitors(NULL) # Clear old data if the call fails
+        # If we couldn't figure out the state, clear the monitor data and state code.
+        rv_statewide_monitors(NULL)
+        rv_state_code(NULL) # <-- ADD THIS LINE TO CLEAR THE STATE CODE
       }
       
     } else {
@@ -1770,11 +1785,10 @@ server <- function(input, output, session) {
   # Renders the state map with monitor locations and their AQI data
   output$monitor_map_plot <- renderPlot({
     sites <- rv_statewide_monitors()
-    local_info <- rv_current_aq_data()
+    state_code <- rv_state_code() # <-- GET THE SAVED STATE CODE
     
-    req(sites, local_info, input$pollutant_select)
-    
-    state_code <- local_info$StateCode[1]
+    # Require the statewide data, the state code, and the pollutant selection.
+    req(sites, state_code, input$pollutant_select)
     
     # Filter using the 'Parameter' column
     filtered_sites <- sites %>%
