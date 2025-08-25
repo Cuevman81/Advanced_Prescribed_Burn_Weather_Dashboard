@@ -5,7 +5,7 @@ ADVANCED PRESCRIBED BURN WEATHER DASHBOARD
 
 OVERVIEW
 --------
-A comprehensive R Shiny application designed to consolidate critical weather, smoke dispersion, and air quality data to aid land managers, ecologists, and fire practitioners in planning and executing prescribed burns safely and effectively.
+A comprehensive R Shiny application designed to consolidate critical weather, smoke dispersion, and air quality data to aid forestry commissions, land managers, ecologists, and fire practitioners in planning and executing prescribed burns safely and effectively.
 
 A screenshot of the application <img width="1400" height="1400" alt="Prescribed Burn Weather Dashboard v2 0" src="https://github.com/user-attachments/assets/a85ba234-677e-4793-b179-b92635139248" />
 
