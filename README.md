@@ -67,23 +67,24 @@ Open the 'app.R' file in RStudio. Run the following command in the R console to 
     ))
 
 STEP 3: SET UP AIR QUALITY API KEY (Optional but Recommended)
+------------------------------------------------------------
 To enable the "Air Quality" tab, you need a free API key from the U.S. EPA's AirNow service.
 
 1. Obtain an API Key:
    - Visit the AirNow API request page: https://docs.airnowapi.org/account/request/
    - Fill out the form to request your free key, which will be sent to your email.
 
-2. Create a '.Renviron' File:
-   - In the root directory of this project (the same folder containing 'app.R'), create a new, blank text file.
-   - Save this file with the exact name '.Renviron'. Be careful that your text editor doesn't add a '.txt' extension.
+2. Configure the '.Renviron' File:
+   - This repository includes a template file named '.Renviron'. Open this file with any plain text editor.
+   - Inside, you will find the following line:
 
-3. Add Your Key to the File:
-   - Open '.Renviron' and add the following line, pasting your key in place of 'YOUR_API_KEY_HERE':
+        AIRNOW_API_KEY="YOUR AIRNOW API KEY"
 
-        AIRNOW_API_KEY="YOUR_API_KEY_HERE"
-
-   - Save and close the file.
-
+   - Replace the text 'YOUR AIRNOW API KEY' with the actual API key you received via email. For example:
+   
+        AIRNOW_API_KEY="a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8"
+        
+   - Save the file. The application will automatically detect your key and enable the air quality features upon relaunch.
 
 USAGE
 -----
