@@ -53,9 +53,9 @@ PREREQUISITES:
 - RStudio: RStudio Desktop is the recommended IDE for running Shiny apps. You can download it at (https://posit.co/download/rstudio-desktop/).
 
 STEP 1: CLONE THE REPOSITORY
-Clone or download this repository to your local machine.
-    
-    git clone <your-repository-url>
+Clone or download this repository to your local machine using the following command:
+
+    git clone https://github.com/Cuevman81/Advanced_Prescribed_Burn_Weather_Dashboard.git
 
 STEP 2: INSTALL REQUIRED R PACKAGES
 Open the 'app.R' file in RStudio. Run the following command in the R console to install all the necessary packages:
