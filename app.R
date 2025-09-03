@@ -23,10 +23,79 @@ library(httr)
 library(stringr)
 library(tigris)
 library(shinycssloaders)
+library(leaflet)
 
 # -----------------------------------------------------------------------------
 # 2. HELPER FUNCTIONS FOR BURN CONDITIONS
 # -----------------------------------------------------------------------------
+
+# --- START: NEW FUNCTION FOR HMS DATA ---
+# Fetches and processes NOAA HMS fire and smoke shapefiles for a given date
+get_hms_data <- function(selected_date) {
+  # Format date components for URL construction
+  year <- format(selected_date, "%Y")
+  month <- format(selected_date, "%m")
+  day_str <- format(selected_date, "%Y%m%d")
+  
+  # Create a unique temporary directory for this date's files
+  temp_dir <- file.path(tempdir(), paste0("hms_data_", day_str))
+  if (!dir.exists(temp_dir)) {
+    dir.create(temp_dir, recursive = TRUE)
+  }
+  
+  fire_sf <- NULL
+  smoke_sf <- NULL
+  
+  # --- Fetch Fire Points Data (No changes here) ---
+  tryCatch({
+    fire_url <- paste0("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/Shapefile/", year, "/", month, "/hms_fire", day_str, ".zip")
+    fire_zip_path <- file.path(temp_dir, "hms_fire.zip")
+    download.file(fire_url, fire_zip_path, mode = "wb", quiet = TRUE)
+    unzip(fire_zip_path, exdir = temp_dir)
+    shp_file <- list.files(temp_dir, pattern = "_fire.*\\.shp$", full.names = TRUE)
+    if (length(shp_file) > 0) {
+      fire_sf <- st_read(shp_file[1], quiet = TRUE) %>%
+        st_transform(4326)
+    }
+  }, error = function(e) {
+    message("Could not download or process HMS fire data for ", selected_date)
+  })
+  
+  # --- Fetch Smoke Polygons Data ---
+  tryCatch({
+    smoke_url <- paste0("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/Shapefile/", year, "/", month, "/hms_smoke", day_str, ".zip")
+    smoke_zip_path <- file.path(temp_dir, "hms_smoke.zip")
+    download.file(smoke_url, smoke_zip_path, mode = "wb", quiet = TRUE)
+    unzip(smoke_zip_path, exdir = temp_dir)
+    shp_file <- list.files(temp_dir, pattern = "_smoke.*\\.shp$", full.names = TRUE)
+    
+    if (length(shp_file) > 0) {
+      smoke_sf_raw <- st_read(shp_file[1], quiet = TRUE) %>%
+        st_transform(4326)
+      
+      # --- NEW CONDITIONAL LOGIC TO HANDLE BOTH DATA TYPES ---
+      # Check if the 'Density' column is numeric
+      if (is.numeric(smoke_sf_raw$Density)) {
+        # If it's numeric, use the range-based logic
+        smoke_sf <- smoke_sf_raw %>%
+          mutate(DensityCategory = case_when(
+            Density >= 27 ~ "Heavy",
+            Density >= 16 ~ "Medium",
+            Density >= 5  ~ "Light",
+            TRUE ~ "Unknown"
+          ) %>% factor(levels = c("Light", "Medium", "Heavy", "Unknown")))
+      } else {
+        # If it's character/text, just use the values directly
+        smoke_sf <- smoke_sf_raw %>%
+          mutate(DensityCategory = factor(Density, levels = c("Light", "Medium", "Heavy", "Unknown")))
+      }
+    }
+  }, error = function(e) {
+    message("Could not download or process HMS smoke data for ", selected_date)
+  })
+  
+  return(list(fire = fire_sf, smoke = smoke_sf))
+}
 
 # Calculate Keetch-Byram Drought Index (simplified version)
 calculate_kbdi_trend <- function(temp, humidity) {
@@ -681,6 +750,7 @@ ui <- dashboardPage(
       menuItem("Forecast Discussion", tabName = "forecastdiscussion", icon = icon("map-marked-alt")),
       menuItem("Burn Windows", tabName = "windows", icon = icon("clock")),
       menuItem("Air Quality", tabName = "airquality", icon = icon("wind")),
+      menuItem("HMS Fire & Smoke", tabName = "hms", icon = icon("fire")),
       menuItem("Drought Information", tabName = "drought", icon = icon("tint-slash")),
       menuItem("Safety Checklist", tabName = "safety", icon = icon("check-square")),
       menuItem("Resources", tabName = "resources", icon = icon("book"))
@@ -913,6 +983,33 @@ ui <- dashboardPage(
               )
       ),
       
+      # --- START: ADD THIS ENTIRE NEW tabItem ---
+      tabItem(tabName = "hms",
+              fluidRow(
+                box(
+                  title = "NOAA HMS Fire and Smoke Analysis",
+                  status = "danger",
+                  solidHeader = TRUE,
+                  width = 12,
+                  
+                  # Date selector
+                  dateInput("hms_date_selector", 
+                            "Select Date:", 
+                            value = Sys.Date(), # Defaults to the current day
+                            max = Sys.Date()    # Users can't select a future date
+                  ),
+                  hr(),
+                  
+                  # The leaflet map output
+                  withSpinner(leafletOutput("hms_map", height = "700px"), type = 6, color = "#dc3545"),
+                  
+                  hr(),
+                  p("This map displays satellite-detected fire hot spots and smoke plumes from the NOAA Hazard Mapping System (HMS). Data is updated daily. This information provides situational awareness but should be field-verified. Polygons represent the approximate area covered by smoke, categorized by density.")
+                )
+              )
+      ),
+      # --- END: NEW tabItem ---
+      
       tabItem(tabName = "drought",
               fluidRow(
                 box(
@@ -942,24 +1039,41 @@ ui <- dashboardPage(
                   uiOutput("burn_restrictions_ui")
                 ),
                 box(
-                  title = "Pre-Burn Safety Checklist",
+                  title = "Pre-Burn Go/No-Go Checklist", # More professional title
                   status = "danger",
                   solidHeader = TRUE,
                   width = 6,
-                  checkboxGroupInput("safety_checks", 
-                                     "Complete all items before burning:",
+                  
+                  # Grouped Checkbox List
+                  h4("Phase 1: Planning & Preparation"),
+                  checkboxGroupInput("safety_checks_planning", NULL,
                                      choices = list(
-                                       "Valid burn permit obtained" = 1,
-                                       "Local fire department notified" = 2,
-                                       "Firebreaks constructed and cleared" = 3,
-                                       "Equipment and personnel ready" = 4,
-                                       "Water/suppression equipment on site" = 5,
-                                       "Weather forecast reviewed" = 6,
-                                       "Smoke management plan in place" = 7,
-                                       "Neighbors/stakeholders notified" = 8,
-                                       "Emergency contacts list prepared" = 9,
-                                       "Test fire location identified" = 10
+                                       "Prescribed Burn Plan Written & Approved" = 1,
+                                       "Valid Burn Permit Obtained" = 2,
+                                       "Risk Assessment & Go/No-Go Parameters Defined" = 3,
+                                       "Contingency Plan Developed (Escape Routes, Suppression Resources)" = 4,
+                                       "Smoke Management Plan & Sensitive Receptors Identified" = 5
                                      )),
+                  
+                  hr(),
+                  h4("Phase 2: On-Site Actions (Day of Burn)"),
+                  checkboxGroupInput("safety_checks_onsite", NULL,
+                                     choices = list(
+                                       "On-Site Weather Verified (within prescription)" = 6,
+                                       "Equipment & Personnel Inspected and Ready" = 7,
+                                       "Firebreaks Confirmed Secure" = 8,
+                                       "Crew Briefing Conducted (Objectives, Roles, Hazards)" = 9,
+                                       "Test Fire Conducted & Evaluated" = 10
+                                     )),
+                  
+                  hr(),
+                  h4("Phase 3: Communication"),
+                  checkboxGroupInput("safety_checks_comms", NULL,
+                                     choices = list(
+                                       "Required Notifications Made (Fire Dept, Forestry, etc.)" = 11,
+                                       "Neighbors/Stakeholders Notified" = 12
+                                     )),
+                  
                   br(),
                   uiOutput("safety_status")
                 ),
@@ -992,72 +1106,45 @@ ui <- dashboardPage(
                   status = "info",
                   solidHeader = TRUE,
                   width = 12,
-                  h4("Understanding the Indices"),
+                  
+                  h4("Understanding the Fire Weather Indices"),
                   tags$ul(
-                    tags$li(strong("Ventilation Index:"), " Product of mixing height and transport wind. Values > 40,000 indicate excellent smoke dispersal."),
-                    tags$li(strong("KBDI Trend:"), " Keetch-Byram Drought Index indicator. Higher values suggest drier conditions."),
-                    tags$li(strong("FFMC:"), " Fine Fuel Moisture Code. Values > 85 indicate very dry fine fuels."),
-                    tags$li(strong("Haines Index:"), " Atmospheric stability. Values 4-6 indicate potential for erratic fire behavior."),
-                    tags$li(strong("Mixing Height:"), " Height of atmospheric mixing. Higher values mean better smoke dispersal."),
-                    tags$li(strong("Transport Wind:"), " Average wind speed in the mixing layer.")
+                    tags$li(strong("Ventilation Index (VI):"), " Product of mixing height and transport wind. Higher values mean better smoke dispersal. (Excellent: > 60,000, Good: 40,000-60,000, Fair: 20,000-40,000, Poor: < 20,000)."),
+                    tags$li(strong("Keetch-Byram Drought Index (KBDI):"), " A measure of long-term drought on a scale of 0-800. (0-200: Low fire potential, 200-400: Moderate, 400-600: High, 600-800: Extreme). This app shows a simplified trend, not the absolute value."),
+                    tags$li(strong("Fine Fuel Moisture Code (FFMC):"), " Estimates moisture in fine fuels on a scale of 0-100. (85-88: High ignition potential, 89-91: Very High, >92: Extreme)."),
+                    tags$li(strong("Haines Index:"), " Atmospheric stability and dryness. (2-3: Very Low Potential, 4: Low, 5: Moderate, 6: High potential for erratic or large fire growth)."),
+                    tags$li(strong("Mixing Height:"), " The height to which the lower atmosphere will be well-mixed. Higher values (>2000 ft) are better for smoke lift."),
+                    tags$li(strong("Transport Wind:"), " Average wind speed within the mixing layer. This wind governs the direction smoke will travel.")
                   ),
-                  
-                  # --- START OF ADDED CONTENT ---
-                  
                   hr(),
                   
-                  h4("Smoke Management Guidelines (Based on Ventilation Index)"),
+                  h4("Common Prescribed Fire Terminology"),
                   tags$ul(
-                    tags$li(strong("Category 1 Days:"), " VI < 20,000 - Avoid burning near smoke-sensitive areas"),
-                    tags$li(strong("Category 2 Days:"), " VI 20,000-40,000 - Limited burning, monitor closely"),
-                    tags$li(strong("Category 3 Days:"), " VI 40,000-60,000 - Good for most burns"),
-                    tags$li(strong("Category 4 Days:"), " VI 60,000-100,000 - Excellent dispersion"),
-                    tags$li(strong("Category 5 Days:"), " VI > 100,000 - Optimal conditions")
+                    tags$li(strong("Ignition Pattern:"), " The method used to light the fire (e.g., backing fire, strip-heading fire) to control intensity."),
+                    tags$li(strong("Mop-up:"), " The process of extinguishing or removing burning material near control lines after the fire has passed to prevent escapes."),
+                    tags$li(strong("Patrol:"), " The period of monitoring the burn unit after mop-up is complete to ensure the fire is completely out."),
+                    tags$li(strong("Spotting:"), " When burning embers (firebrands) are carried by the wind and start new fires beyond the main control lines."),
+                    tags$li(strong("Firebreak:"), " A natural or man-made barrier used to stop or check fires, or to provide a control line from which to work.")
                   ),
-                  tags$p(em("Note: Always consider transport wind direction relative to smoke-sensitive receptors.")),
+                  hr(),
                   
-                  # --- END OF ADDED CONTENT ---
-                  
+                  h4("Post-Burn Responsibilities"),
+                  tags$p("A prescribed burn is not complete until it is declared 'out'. This involves:"),
+                  tags$ul(
+                    tags$li(strong("1. Mop-up:"), "Securing the perimeter of the burn unit by extinguishing all smoldering fuels within a specified distance from the control line (e.g., 50-100 feet)."),
+                    tags$li(strong("2. Patrol & Monitor:"), "Periodically checking the burn area for several days to ensure no smoke or heat remains and that the fire cannot reignite or escape.")
+                  ),
                   hr(),
                   
                   h4("Useful Links"),
                   tags$ul(
-                    tags$li(a("National Weather Service Fire Weather", 
-                              href = "https://www.weather.gov/fire", target = "_blank")),
-                    tags$li(a("USFS Fire Weather and Smoke Management", 
-                              href = "https://www.fs.usda.gov/managing-land/fire", target = "_blank")),
-                    tags$li(a("Basic Smoke Management Practices", 
-                              href = "https://www.srs.fs.usda.gov/pubs/misc/ag_654.pdf", target = "_blank")),
-                    tags$li(a("Prescribed Fire Alliance", 
-                              href = "https://www.prescribedfire.net/", target = "_blank"))
+                    tags$li(a("National Weather Service Fire Weather", href = "https://www.weather.gov/fire", target = "_blank")),
+                    tags$li(a("NWCG Prescribed Fire Resources", href = "https://www.nwcg.gov/publications/pms484", target = "_blank")),
+                    tags$li(a("Request a Spot Weather Forecast", href = "https://spot.weather.gov/new-request", target = "_blank"))
                   ),
-                  
-                  # --- START OF ADDED CONTENT ---
-                  
                   hr(),
                   
-                  h4("Request a Spot Weather Forecast"),
-                  tags$div(class = "alert alert-info",
-                           tags$p(strong("For critical burns, request a Spot Weather Forecast from NWS:")),
-                           tags$ul(
-                             tags$li("Available free from National Weather Service."),
-                             tags$li("Provides site-specific forecast for your burn."),
-                             tags$li("Request 24-48 hours in advance when possible."),
-                             tags$li(a("Request Spot Forecast", 
-                                       href = "https://spot.weather.gov/new-request", 
-                                       target = "_blank", 
-                                       class = "btn btn-primary btn-sm",
-                                       style = "margin-top: 5px;"))
-                           )
-                  ),
-                  
-                  # --- END OF ADDED CONTENT ---
-                  
-                  hr(),
-                  
-                  p(strong("Disclaimer:"), 
-                    "This tool provides weather information for planning purposes only. Always verify conditions on-site, 
-                    obtain proper permits, and follow local regulations. The user assumes all responsibility for burn operations.")
+                  p(strong("Disclaimer:"), "This tool provides weather information for planning purposes only. Always verify conditions on-site, obtain proper permits, and follow local regulations. The user assumes all responsibility for burn operations.")
                 )
               )
       ),
@@ -1101,6 +1188,7 @@ server <- function(input, output, session) {
   rv_burn_restrictions <- reactiveVal(NULL)
   
   rv_statewide_monitors <- reactiveVal(NULL)
+  rv_hms_data <- reactiveVal(NULL)
   
   # Fetch weather data when button clicked
   observeEvent(input$get_weather_btn, {
@@ -1920,15 +2008,20 @@ server <- function(input, output, session) {
   
   # Safety Status
   output$safety_status <- renderUI({
-    checked <- length(input$safety_checks)
-    total <- 10
+    # Combine the checked items from all three groups
+    checked <- c(input$safety_checks_planning, 
+                 input$safety_checks_onsite, 
+                 input$safety_checks_comms)
     
-    if (checked == total) {
+    num_checked <- length(checked)
+    total <- 12 # The new total number of items
+    
+    if (num_checked == total) {
       div(class = "alert alert-success",
-          icon("check-circle"), " All safety items checked! Ready to proceed.")
+          icon("check-circle"), " All safety items checked! Ready to proceed with caution.")
     } else {
       div(class = "alert alert-warning",
-          icon("exclamation-triangle"), sprintf(" %d of %d items checked", checked, total))
+          icon("exclamation-triangle"), sprintf(" %d of %d items checked", num_checked, total))
     }
   })
   
@@ -1968,6 +2061,143 @@ server <- function(input, output, session) {
       h4(".ZONE-SPECIFIC FORECAST TRENDS..."),
       pre(style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace;", zone_text)
     )
+  })
+  
+  # Observer to fetch HMS data when the date changes
+  observeEvent(input$hms_date_selector, {
+    selected_date <- input$hms_date_selector
+    
+    # Show a notification to the user
+    showNotification(paste("Fetching HMS data for", selected_date, "..."), 
+                     id = "hms_loading", type = "message", duration = NULL)
+    
+    # Fetch the data using the helper function
+    hms_results <- get_hms_data(selected_date)
+    
+    # Store the results in the reactive value
+    rv_hms_data(hms_results)
+    
+    # Remove the loading notification
+    removeNotification("hms_loading")
+    
+    # Inform the user of the result
+    if (is.null(hms_results) || (is.null(hms_results$fire) && is.null(hms_results$smoke))) {
+      showNotification(paste("No HMS fire or smoke data was found for", selected_date), type = "warning")
+    } else {
+      showNotification("HMS data loaded successfully.", type = "message", duration = 4)
+    }
+  }, ignoreInit = FALSE) # ignoreInit=FALSE ensures it runs on startup with the default date
+  
+  # Render the interactive Leaflet map
+  output$hms_map <- renderLeaflet({
+    hms_data <- rv_hms_data()
+    
+    # Define color palettes for smoke (no changes)
+    smoke_palette <- colorFactor(
+      palette = c("gray80", "gray55", "gray30", "#BEBEBE"),
+      domain = c("Light", "Medium", "Heavy", "Unknown")
+    )
+    
+    # Start building the base map (no changes)
+    map <- leaflet() %>%
+      addProviderTiles(providers$CartoDB.Positron, group = "Street Map") %>%
+      addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+      setView(lng = -98.5795, lat = 39.8283, zoom = 4)
+    
+    # Add smoke polygons if they exist (no changes)
+    if (!is.null(hms_data$smoke) && nrow(hms_data$smoke) > 0) {
+      map <- map %>%
+        addPolygons(
+          data = hms_data$smoke,
+          fillColor = ~smoke_palette(DensityCategory),
+          fillOpacity = 0.5,
+          weight = 1,
+          color = "black",
+          popup = ~paste("<b>Smoke Density:</b>", DensityCategory),
+          group = "Smoke Plumes"
+        )
+    }
+    
+    # Add fire points if they exist
+    if (!is.null(hms_data$fire) && nrow(hms_data$fire) > 0) {
+      map <- map %>%
+        addCircleMarkers(
+          data = hms_data$fire,
+          
+          # --- MODIFICATION 1: DYNAMIC RADIUS ---
+          # Use a logarithmic scale to handle the wide range of FRP values.
+          # We add 1 to avoid log(0) and multiply by 2 for better visual scaling.
+          radius = ~log(FRP + 1) * 2,
+          
+          color = "red",
+          stroke = FALSE,
+          fillOpacity = 0.7, # Slightly reduced opacity
+          popup = ~paste0(
+            "<b>Fire Detection Details</b><br>",
+            "<b>Time:</b> ", substr(Time, 1, 2), ":", substr(Time, 3, 4), " UTC<br>",
+            "<b>Source:</b> ", Satellite, " (", Method, ")<br>",
+            "<b>Intensity (FRP):</b> ", round(FRP, 2), " MW"
+          ),
+          group = "Fire Detections"
+        )
+    }
+    
+    # Add layer controls (no changes)
+    map <- map %>%
+      addLayersControl(
+        baseGroups = c("Street Map", "Satellite"),
+        overlayGroups = c("Smoke Plumes", "Fire Detections"),
+        options = layersControlOptions(collapsed = FALSE)
+      )
+    
+    # Add smoke legend if there's data (no changes)
+    if (!is.null(hms_data$smoke) && nrow(hms_data$smoke) > 0) {
+      map <- map %>%
+        addLegend(
+          position = "bottomright",
+          pal = smoke_palette,
+          values = hms_data$smoke$DensityCategory,
+          title = "Smoke Density",
+          opacity = 0.7
+        )
+    }
+    
+    # --- MODIFICATION 2: ADD CUSTOM LEGEND FOR FIRE SIZE ---
+    # Create HTML for a custom legend control
+    legend_html <- "
+    <div style='background-color: rgba(255, 255, 255, 0.8);
+                padding: 10px;
+                border-radius: 5px;
+                border: 1px solid #ccc;'>
+      <h4 style='margin-top:0;'>Fire Intensity (FRP)</h4>
+      <div style='display: flex; align-items: center; margin-bottom: 5px;'>
+        <div style='background:red; width:%1$spx; height:%1$spx; border-radius:50%%; margin-right:8px;'></div><span>10 MW</span>
+      </div>
+      <div style='display: flex; align-items: center; margin-bottom: 5px;'>
+        <div style='background:red; width:%2$spx; height:%2$spx; border-radius:50%%; margin-right:8px;'></div><span>100 MW</span>
+      </div>
+      <div style='display: flex; align-items: center;'>
+        <div style='background:red; width:%3$spx; height:%3$spx; border-radius:50%%; margin-right:8px;'></div><span>1000 MW</span>
+      </div>
+    </div>
+  "
+    
+    # Calculate the pixel diameter for the legend examples using the same formula as the map
+    # Diameter is 2 * radius
+    size_10mw <- 2 * (log(10 + 1) * 2)
+    size_100mw <- 2 * (log(100 + 1) * 2)
+    size_1000mw <- 2 * (log(1000 + 1) * 2)
+    
+    # Add the custom control to the map if there is fire data
+    if (!is.null(hms_data$fire) && nrow(hms_data$fire) > 0) {
+      map <- map %>%
+        addControl(
+          html = sprintf(legend_html, size_10mw, size_100mw, size_1000mw),
+          position = "bottomleft"
+        )
+    }
+    
+    map # Return the final map object
   })
   
   # Download handler
