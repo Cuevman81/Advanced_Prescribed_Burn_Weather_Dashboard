@@ -1613,10 +1613,9 @@ server <- function(input, output, session) {
     df <- rv_forecast_data()
     if (is.null(df) || nrow(df) == 0) return(NULL)
     
-    # Find optimal burn windows WITH PRESCRIPTION COMPLIANCE
-    df_optimal <- df %>%
+    # --- STEP 1: Filter first to see if ANY hours meet the strict criteria ---
+    df_filtered <- df %>%
       mutate(
-        # Check prescription compliance
         temp_ok = temp >= input$temp_slider[1] & temp <= input$temp_slider[2],
         rh_ok = humidity >= input$rh_slider[1] & humidity <= input$rh_slider[2],
         wind_ok = wind_speed >= input$wind_slider[1] & wind_speed <= input$wind_slider[2],
@@ -1624,30 +1623,47 @@ server <- function(input, output, session) {
         all_params_ok = temp_ok & rh_ok & wind_ok & vi_ok
       ) %>%
       filter(all_params_ok,
-             hour_of_day >= 10 & hour_of_day <= 16) %>%
-      group_by(day_label) %>%
-      summarise(
-        start_time = min(time),
-        end_time = max(time),
-        avg_temp = round(mean(temp), 0),
-        avg_humidity = round(mean(humidity), 0),
-        avg_wind = round(mean(wind_speed), 1),
-        avg_vi = round(mean(ventilation_index), 0),
-        avg_dispersion = first(dispersion_category),  # ADD THIS
-        hours = n(),
-        .groups = 'drop'
-      ) %>%
-      filter(hours >= 2)  # At least 2 consecutive good hours
+             hour_of_day >= 10 & hour_of_day <= 16)
     
-    if (nrow(df_optimal) == 0) {
-      return(div(
-        class = "alert alert-warning",
-        "No burn windows meeting ALL prescription parameters found in the next 72 hours.",
-        br(),
-        "Consider adjusting your prescription parameters."
-      ))
+    # --- STEP 2: Only summarise the data IF there are rows to process ---
+    if (nrow(df_filtered) > 0) {
+      df_optimal <- df_filtered %>%
+        group_by(day_label) %>%
+        summarise(
+          start_time = min(time),
+          end_time = max(time),
+          avg_temp = round(mean(temp), 0),
+          avg_humidity = round(mean(humidity), 0),
+          avg_wind = round(mean(wind_speed), 1),
+          avg_vi = round(mean(ventilation_index), 0),
+          avg_dispersion = first(dispersion_category),
+          hours = n(),
+          .groups = 'drop'
+        ) %>%
+        filter(hours >= 2) # At least 2 consecutive good hours
+    } else {
+      # If no rows passed the filter, create an empty tibble to prevent errors
+      df_optimal <- tibble()
     }
     
+    # This final check now works perfectly without any warnings being generated
+    if (is.null(df_optimal) || nrow(df_optimal) == 0) {
+      return(
+        div(
+          class = "alert alert-warning",
+          h4("No 'Optimal' Burn Windows Found"),
+          p("This means no time periods met 100% of the criteria you set in the 'Burn Prescription Parameters' on the Dashboard tab."),
+          p("The heatmap below shows the general burn quality, which uses a more flexible scoring system. You may see 'Good' or 'Fair' hours there even if they don't meet your strict prescription."),
+          strong("Action:"),
+          tags$ul(
+            tags$li("Review the heatmap to see which parameters might be slightly out of range during otherwise good periods."),
+            tags$li("Consider adjusting the prescription sliders on the Dashboard if your burn plan allows for flexibility.")
+          )
+        )
+      )
+    }
+    
+    # This part for displaying found windows remains the same
     window_boxes <- lapply(1:nrow(df_optimal), function(i) {
       window <- df_optimal[i, ]
       div(
@@ -1662,7 +1678,7 @@ server <- function(input, output, session) {
           "RH: ", window$avg_humidity, "% | ",
           "Wind: ", window$avg_wind, " mph | ",
           "VI: ", format(window$avg_vi, big.mark = ",")),
-        p(strong("Smoke Dispersion: "), window$avg_dispersion)  # ADD THIS
+        p(strong("Smoke Dispersion: "), window$avg_dispersion)
       )
     })
     
