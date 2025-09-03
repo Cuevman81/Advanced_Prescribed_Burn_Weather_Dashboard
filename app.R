@@ -32,21 +32,16 @@ library(leaflet)
 # --- START: NEW FUNCTION FOR HMS DATA ---
 # Fetches and processes NOAA HMS fire and smoke shapefiles for a given date
 get_hms_data <- function(selected_date) {
-  # Format date components for URL construction
   year <- format(selected_date, "%Y")
   month <- format(selected_date, "%m")
   day_str <- format(selected_date, "%Y%m%d")
-  
-  # Create a unique temporary directory for this date's files
   temp_dir <- file.path(tempdir(), paste0("hms_data_", day_str))
-  if (!dir.exists(temp_dir)) {
-    dir.create(temp_dir, recursive = TRUE)
-  }
+  if (!dir.exists(temp_dir)) { dir.create(temp_dir, recursive = TRUE) }
   
   fire_sf <- NULL
   smoke_sf <- NULL
   
-  # --- Fetch Fire Points Data (No changes here) ---
+  # --- Fetch Fire Points Data ---
   tryCatch({
     fire_url <- paste0("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/Shapefile/", year, "/", month, "/hms_fire", day_str, ".zip")
     fire_zip_path <- file.path(temp_dir, "hms_fire.zip")
@@ -54,12 +49,9 @@ get_hms_data <- function(selected_date) {
     unzip(fire_zip_path, exdir = temp_dir)
     shp_file <- list.files(temp_dir, pattern = "_fire.*\\.shp$", full.names = TRUE)
     if (length(shp_file) > 0) {
-      fire_sf <- st_read(shp_file[1], quiet = TRUE) %>%
-        st_transform(4326)
+      fire_sf <- st_read(shp_file[1], quiet = TRUE) %>% st_transform(4326)
     }
-  }, error = function(e) {
-    message("Could not download or process HMS fire data for ", selected_date)
-  })
+  }, error = function(e) { message("Could not download or process HMS fire data for ", selected_date) })
   
   # --- Fetch Smoke Polygons Data ---
   tryCatch({
@@ -70,29 +62,24 @@ get_hms_data <- function(selected_date) {
     shp_file <- list.files(temp_dir, pattern = "_smoke.*\\.shp$", full.names = TRUE)
     
     if (length(shp_file) > 0) {
-      smoke_sf_raw <- st_read(shp_file[1], quiet = TRUE) %>%
-        st_transform(4326)
+      smoke_sf_raw <- st_read(shp_file[1], quiet = TRUE) %>% st_transform(4326)
       
-      # --- NEW CONDITIONAL LOGIC TO HANDLE BOTH DATA TYPES ---
-      # Check if the 'Density' column is numeric
       if (is.numeric(smoke_sf_raw$Density)) {
-        # If it's numeric, use the range-based logic
         smoke_sf <- smoke_sf_raw %>%
           mutate(DensityCategory = case_when(
             Density >= 27 ~ "Heavy",
             Density >= 16 ~ "Medium",
             Density >= 5  ~ "Light",
             TRUE ~ "Unknown"
-          ) %>% factor(levels = c("Light", "Medium", "Heavy", "Unknown")))
+          ) %>% 
+            factor(levels = c("Light", "Medium", "Heavy", "Unknown")))
       } else {
-        # If it's character/text, just use the values directly
         smoke_sf <- smoke_sf_raw %>%
-          mutate(DensityCategory = factor(Density, levels = c("Light", "Medium", "Heavy", "Unknown")))
+          mutate(DensityCategory = 
+                   factor(Density, levels = c("Light", "Medium", "Heavy", "Unknown")))
       }
     }
-  }, error = function(e) {
-    message("Could not download or process HMS smoke data for ", selected_date)
-  })
+  }, error = function(e) { message("Could not download or process HMS smoke data for ", selected_date) })
   
   return(list(fire = fire_sf, smoke = smoke_sf))
 }
@@ -2108,10 +2095,13 @@ server <- function(input, output, session) {
   output$hms_map <- renderLeaflet({
     hms_data <- rv_hms_data()
     
-    # Define color palettes for smoke (no changes)
     smoke_palette <- colorFactor(
-      palette = c("gray80", "gray55", "gray30", "#BEBEBE"),
-      domain = c("Light", "Medium", "Heavy", "Unknown")
+      palette = c("Light" = "#D3D3D3", 
+                  "Medium" = "#808080", 
+                  "Heavy" = "#2B2B2B", 
+                  "Unknown" = "#BEBEBE"),
+      domain = c("Light", "Medium", "Heavy", "Unknown"),
+      ordered = TRUE
     )
     
     # Start building the base map (no changes)
