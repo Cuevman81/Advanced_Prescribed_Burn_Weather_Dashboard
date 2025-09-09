@@ -24,10 +24,74 @@ library(stringr)
 library(tigris)
 library(shinycssloaders)
 library(leaflet)
+library(riem)
+
+
+# Load the pre-computed station list when the app starts.
+us_stations_list <- readRDS("us_stations.rds")
 
 # -----------------------------------------------------------------------------
 # 2. HELPER FUNCTIONS FOR BURN CONDITIONS
 # -----------------------------------------------------------------------------
+
+# --- START: NEW, INSTANTANEOUS FUNCTION FOR FINDING STATIONS ---
+
+
+find_nearest_station <- function(target_lat, target_lon) {
+  
+  # The function now directly uses the 'us_stations_list' object we loaded at startup.
+  # No API calls, no memoise, no delay.
+  
+  # Calculate distance to all stations in the pre-loaded list
+  us_stations_with_distance <- us_stations_list %>%
+    mutate(
+      distance = sqrt((target_lon - lon)^2 + (target_lat - lat)^2)
+    )
+  
+  # Find and return the station with the minimum distance
+  closest_station <- us_stations_with_distance %>%
+    filter(distance == min(distance, na.rm = TRUE)) %>%
+    slice(1)
+  
+  return(closest_station)
+}
+
+
+# Fetches the latest observation from the nearest station
+get_realtime_conditions <- function(lat, lon) {
+  tryCatch({
+    # Step 1: Find the nearest station
+    station_info <- find_nearest_station(lat, lon)
+    if (is.null(station_info) || nrow(station_info) == 0) return(NULL)
+    
+    station_id <- station_info$id
+    
+    # Step 2: Get all of today's measurements for that station
+    todays_data <- riem_measures(station = station_id, date_start = Sys.Date())
+    if (is.null(todays_data) || nrow(todays_data) == 0) return(NULL)
+    
+    # Step 3: Get the single most recent observation (the last row)
+    latest_obs <- todays_data %>%
+      slice_tail(n = 1) %>%
+      # Step 4: Rename columns to match what the UI expects
+      rename(
+        temp = tmpf,
+        humidity = relh
+      ) %>%
+      # Step 5: Convert wind from knots to mph for consistency
+      mutate(
+        wind_speed = round(sknt * 1.15078, 0)
+      )
+    
+    return(list(data = latest_obs, station = station_info))
+    
+  }, error = function(e) {
+    message("Could not retrieve real-time data from riem.")
+    print(e)
+    return(NULL)
+  })
+}
+
 
 # --- START: NEW FUNCTION FOR HMS DATA ---
 # Fetches and processes NOAA HMS fire and smoke shapefiles for a given date
@@ -620,63 +684,123 @@ get_monitors_by_state_bbox <- function(state_code, api_key) {
 }
 
 # -----------------------------------------------------------------------------
-# 3. ENHANCED DATA FETCHING FUNCTION (CORRECTED)
+# 3. ENHANCED DATA FETCHING FUNCTION (FINAL CORRECTED VERSION)
 # -----------------------------------------------------------------------------
 get_prescribed_burn_forecast <- function(lat, lon, days_since_rain_input, location_text) { 
   
   tryCatch({
     print(paste("Fetching forecast for lat:", lat, "lon:", lon))
     
-    # --- Part 1: Standard Point Forecast (for hourly data) ---
-    hourly_forecast_raw <- weathR::point_forecast(lat = lat, lon = lon)
+    # --- Part 1: Get Metadata and the Grid Data URL ---
     location_metadata <- weathR::point_data(lat = lat, lon = lon)
     nws_office_code <- location_metadata$cwa
     grid_data_url <- location_metadata$forecast_grid_data
-    raw_grid_data <- fromJSON(grid_data_url)
-    
-    weather_df <- if (!is.null(raw_grid_data$properties$weather) && length(raw_grid_data$properties$weather$values) > 0) {
-      raw_grid_data$properties$weather$values %>%
-        mutate(weather_code = map_chr(value, ~paste(.x$weather, collapse = " ") %||% NA_character_)) %>%
-        select(validTime, weather_code)
-    } else NULL
-    mixing_height_df <- if (!is.null(raw_grid_data$properties$mixingHeight) && length(raw_grid_data$properties$mixingHeight$values) > 0) {
-      raw_grid_data$properties$mixingHeight$values %>% rename(mixing_height_raw_m = value)
-    } else NULL
-    transport_wind_df <- if (!is.null(raw_grid_data$properties$transportWindSpeed) && length(raw_grid_data$properties$transportWindSpeed$values) > 0) {
-      raw_grid_data$properties$transportWindSpeed$values %>% rename(transport_wind_kts = value)
-    } else NULL
-    haines_df <- if (!is.null(raw_grid_data$properties$hainesIndex) && length(raw_grid_data$properties$hainesIndex$values) > 0) {
-      raw_grid_data$properties$hainesIndex$values %>% rename(haines_index = value)
-    } else NULL
-    if (!is.null(weather_df)) weather_df$time_utc <- as.POSIXct(sub("/.*", "", weather_df$validTime), format="%Y-%m-%dT%H:%M:%S+00:00", tz="UTC")
-    if (!is.null(mixing_height_df)) mixing_height_df$time_utc <- as.POSIXct(sub("/.*", "", mixing_height_df$validTime), format="%Y-%m-%dT%H:%M:%S+00:00", tz="UTC")
-    if (!is.null(transport_wind_df)) transport_wind_df$time_utc <- as.POSIXct(sub("/.*", "", transport_wind_df$validTime), format="%Y-%m-%dT%H:%M:%S+00:00", tz="UTC")
-    if (!is.null(haines_df)) haines_df$time_utc <- as.POSIXct(sub("/.*", "", haines_df$validTime), format="%Y-%m-%dT%H:%M:%S+00:00", tz="UTC")
-    hourly_forecast <- as.data.frame(hourly_forecast_raw) %>% select(-any_of("geometry"))
-    hourly_forecast$time_utc <- with_tz(as.POSIXct(hourly_forecast$time), "UTC")
-    full_timeline <- tibble( time_utc = seq(from = floor_date(min(hourly_forecast$time_utc), "hour"), to = max(hourly_forecast$time_utc), by = "hour") )
-    master_df <- full_timeline %>% left_join(hourly_forecast, by = "time_utc")
-    if (!is.null(weather_df)) master_df <- master_df %>% left_join(select(weather_df, time_utc, weather_code), by = "time_utc")
-    if (!is.null(mixing_height_df)) master_df <- master_df %>% left_join(as.data.frame(mixing_height_df), by = "time_utc")
-    if (!is.null(transport_wind_df)) master_df <- master_df %>% left_join(as.data.frame(transport_wind_df), by = "time_utc")
-    if (!is.null(haines_df)) master_df <- master_df %>% left_join(as.data.frame(haines_df), by = "time_utc")
-    fire_weather_cols <- c("mixing_height_raw_m", "transport_wind_kts", "haines_index", "weather_code")
-    for (col in fire_weather_cols) { if (!col %in% names(master_df)) { master_df[[col]] <- if (col == "weather_code") NA_character_ else NA_real_ } }
-    master_df <- master_df %>% fill(all_of(fire_weather_cols), .direction = "down")
     local_timezone <- location_metadata$time_zone
-    processed_df <- master_df %>% filter(!is.na(temp) & !is.na(humidity) & !is.na(wind_speed))
-    if (nrow(processed_df) == 0) return(NULL)
-    final_df <- processed_df %>%
-      mutate( local_time = with_tz(time_utc, local_timezone), hour_of_day = hour(local_time), mixing_height_m = round(mixing_height_raw_m), mixing_height_ft = round(mixing_height_raw_m * 3.28084, 0), transport_wind_mph = round(transport_wind_kts * 1.15078, 1), transport_wind_ms = round(transport_wind_mph * 0.44704, 0), ventilation_index = mixing_height_ft * transport_wind_mph, kbdi_trend = calculate_kbdi_trend(temp, humidity), ffmc = calculate_ffmc(temp, humidity, wind_speed) ) %>%
-      mutate( fuel_moisture_vals = pmap(list(temp, humidity, days_since_rain_input), calculate_fuel_moisture), dispersion_vals = pmap(list(mixing_height_ft, transport_wind_mph, hour_of_day), determine_dispersion_category), assessment_vals = pmap(list(temp, humidity, wind_speed, mixing_height_ft, ventilation_index), assess_burn_window) ) %>%
-      mutate( fuel_moisture_one_hr = map_dbl(fuel_moisture_vals, "one_hr"), fuel_moisture_ten_hr = map_dbl(fuel_moisture_vals, "ten_hr"), dispersion_category = map_chr(dispersion_vals, "category"), dispersion_description = map_chr(dispersion_vals, "description"), dispersion_adjusted_vi = map_dbl(dispersion_vals, "adjusted_vi"), burn_quality = map_chr(assessment_vals, "category"), burn_score = map_dbl(assessment_vals, "score") ) %>%
-      mutate( ignition_prob = calculate_ignition_probability(temp, humidity, fuel_moisture_one_hr), day_label = format(local_time, "%a %m/%d") )
-    if(!"wind_gust" %in% names(final_df)) { final_df$wind_gust <- final_df$wind_speed * 1.3 }
-    final_df <- final_df %>%
-      select( time = local_time, temp, humidity, wind_speed, any_of(c("wind_gust", "precipitation_prob")), wind_dir, any_of("sky_cover"), weather_code, mixing_height_m, mixing_height_ft, transport_wind_mph, transport_wind_ms, any_of("transport_wind_dir"), ventilation_index, haines_index, kbdi_trend, ffmc, fuel_moisture_one_hr, ignition_prob, dispersion_category, dispersion_description, dispersion_adjusted_vi, burn_quality, burn_score, hour_of_day, day_label ) %>%
+    
+    # --- Part 2: Fetch the Raw Grid Data ---
+    raw_grid_response <- httr::GET(grid_data_url)
+    if (status_code(raw_grid_response) != 200) {
+      stop("Failed to fetch raw grid data from NWS.")
+    }
+    raw_grid_data <- fromJSON(content(raw_grid_response, "text", encoding = "UTF-8"))$properties
+    
+    # --- Part 3: Define a helper to safely extract and process each variable ---
+    extract_grid_variable <- function(grid_data, var_name, new_col_name) {
+      if (!is.null(grid_data[[var_name]]) && length(grid_data[[var_name]]$values) > 0) {
+        values_df <- as_tibble(grid_data[[var_name]]$values)
+        df <- values_df %>%
+          mutate(
+            time_utc = as.POSIXct(sub("/.*", "", validTime), format="%Y-%m-%dT%H:%M:%S+00:00", tz="UTC")
+          ) %>%
+          rename(!!new_col_name := value) %>%
+          select(time_utc, !!new_col_name)
+        return(df)
+      }
+      return(NULL)
+    }
+    
+    # --- Part 4: Extract all desired variables from the raw grid data ---
+    df_list <- list(
+      temp_c = extract_grid_variable(raw_grid_data, "temperature", "temp_c"),
+      humidity = extract_grid_variable(raw_grid_data, "relativeHumidity", "humidity"),
+      # --- FIX 1: Rename to reflect correct units (km/h) ---
+      wind_speed_kmh = extract_grid_variable(raw_grid_data, "windSpeed", "wind_speed_kmh"),
+      wind_dir = extract_grid_variable(raw_grid_data, "windDirection", "wind_dir_deg"),
+      wind_gust_kmh = extract_grid_variable(raw_grid_data, "windGust", "wind_gust_kmh"),
+      sky_cover = extract_grid_variable(raw_grid_data, "skyCover", "sky_cover"),
+      weather = extract_grid_variable(raw_grid_data, "weather", "weather_raw"),
+      mixing_height = extract_grid_variable(raw_grid_data, "mixingHeight", "mixing_height_m"),
+      transport_wind_kts = extract_grid_variable(raw_grid_data, "transportWindSpeed", "transport_wind_kts"),
+      transport_wind_dir = extract_grid_variable(raw_grid_data, "transportWindDirection", "transport_wind_dir"),
+      haines_index = extract_grid_variable(raw_grid_data, "hainesIndex", "haines_index")
+    ) %>%
+      purrr::compact()
+    
+    # --- Part 5: Combine all dataframes and process them ---
+    if (length(df_list) < 2) return(NULL)
+    
+    master_df <- df_list %>%
+      purrr::reduce(full_join, by = "time_utc") %>%
+      arrange(time_utc) %>%
+      zoo::na.locf(na.rm = FALSE)
+    
+    degrees_to_cardinal <- function(deg) {
+      if(is.na(deg)) return(NA_character_)
+      dirs <- c("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N")
+      return(dirs[round(deg / 22.5) + 1])
+    }
+    
+    final_df <- master_df %>%
+      mutate(
+        temp = round((temp_c * 9/5) + 32, 0),
+        # --- FIX 2: Use the correct conversion factor for km/h to mph ---
+        wind_speed = round(wind_speed_kmh * 0.621371, 0),
+        wind_gust = if ("wind_gust_kmh" %in% names(.)) round(wind_gust_kmh * 0.621371, 0) else NA_real_,
+        wind_dir = sapply(wind_dir_deg, degrees_to_cardinal),
+        mixing_height_ft = round(mixing_height_m * 3.28084, 0),
+        transport_wind_mph = round(transport_wind_kts * 1.15078, 1),
+        transport_wind_ms = round(transport_wind_mph * 0.44704, 0),
+        weather_code = if ("weather_raw" %in% names(.)) map_chr(weather_raw, ~paste(.x$weather, collapse = " ") %||% NA_character_) else NA_character_,
+        local_time = with_tz(time_utc, local_timezone),
+        hour_of_day = hour(local_time),
+        ventilation_index = mixing_height_ft * transport_wind_mph,
+        kbdi_trend = calculate_kbdi_trend(temp, humidity),
+        ffmc = calculate_ffmc(temp, humidity, wind_speed)
+      ) %>%
+      rowwise() %>%
+      mutate(
+        fuel_moisture_vals = list(calculate_fuel_moisture(temp, humidity, days_since_rain_input)),
+        dispersion_vals = list(determine_dispersion_category(mixing_height_ft, transport_wind_mph, hour_of_day)),
+        assessment_vals = list(assess_burn_window(temp, humidity, wind_speed, mixing_height_ft, ventilation_index))
+      ) %>%
+      ungroup() %>%
+      unnest_wider(fuel_moisture_vals, names_sep = "_") %>%
+      unnest_wider(dispersion_vals, names_sep = "_") %>%
+      unnest_wider(assessment_vals, names_sep = "_") %>%
+      rename(
+        fuel_moisture_one_hr = fuel_moisture_vals_one_hr,
+        fuel_moisture_ten_hr = fuel_moisture_vals_ten_hr,
+        dispersion_category = dispersion_vals_category,
+        dispersion_description = dispersion_vals_description,
+        dispersion_adjusted_vi = dispersion_vals_adjusted_vi,
+        burn_quality = assessment_vals_category,
+        burn_score = assessment_vals_score
+      ) %>%
+      mutate(
+        ignition_prob = calculate_ignition_probability(temp, humidity, fuel_moisture_one_hr),
+        day_label = format(local_time, "%a %m/%d")
+      ) %>%
+      select(
+        time = local_time, temp, humidity, wind_speed, any_of("wind_gust"), wind_dir,
+        any_of("sky_cover"), weather_code, mixing_height_m, mixing_height_ft,
+        transport_wind_mph, transport_wind_ms, any_of("transport_wind_dir"),
+        ventilation_index, any_of("haines_index"), kbdi_trend, ffmc, fuel_moisture_one_hr,
+        ignition_prob, dispersion_category, dispersion_description,
+        dispersion_adjusted_vi, burn_quality, burn_score, hour_of_day, day_label
+      ) %>%
+      filter(!is.na(temp)) %>%
       head(72)
     
-    # --- Part 2: Fetch the Full Fire Weather Product ---
     fwf_url <- paste0("https://api.weather.gov/products/types/FWF/locations/", nws_office_code)
     fwf_list <- httr::GET(fwf_url, timeout(5))
     full_product_text <- if (status_code(fwf_list) == 200) {
@@ -685,12 +809,8 @@ get_prescribed_burn_forecast <- function(lat, lon, days_since_rain_input, locati
       fromJSON(content(fwf_product, "text", encoding = "UTF-8"))$productText
     } else { NA }
     
-    # --- Part 3: Extract the Specific Sections ---
     discussion <- if (!is.na(full_product_text)) {
-      # This regex is now more robust. It stops at the start of the next zone code (e.g., MSZ040)
-      # OR the next ".SECTION...", which prevents it from grabbing the first zone forecast.
       extracted <- str_extract(full_product_text, "\\.DISCUSSION...[\\s\\S]*?(?=\\n\\n[A-Z]{2}Z[0-9]{3}|\\n\\n\\.|&&|\\$\\$)")
-      
       if(!is.na(extracted)) trimws(extracted) else "Official discussion not found."
     } else { "Fire weather discussion product not available." }
     
@@ -698,17 +818,11 @@ get_prescribed_burn_forecast <- function(lat, lon, days_since_rain_input, locati
       get_fire_weather_zone_forecast_by_city(full_product_text, location_text)
     } else { "Zone forecast product not available." }
     
-    # --- Part 4: Safely get the short narrative for the hourly data ---
-    df_raw <- as.data.frame(hourly_forecast_raw)
-    if ("name" %in% names(df_raw)) {
-      narrative_forecast <- df_raw %>% select(name, detailedForecast) %>% distinct()
-    } else if ("period" %in% names(df_raw)) {
-      narrative_forecast <- df_raw %>% select(name = period, detailedForecast) %>% distinct()
-    } else {
-      narrative_forecast <- tibble(name = character(0), detailedForecast = character(0))
-    }
+    narrative_forecast <- tibble(
+      name = "Forecast Summary",
+      detailedForecast = "The detailed hourly forecast table provides the most accurate, time-synced weather data. Please refer to it for specific trends in temperature, humidity, and wind."
+    )
     
-    # --- Final Step: Return ALL the data pieces ---
     return(list(
       forecast = final_df, 
       nws_office = nws_office_code, 
@@ -1165,6 +1279,10 @@ server <- function(input, output, session) {
   rv_nws_office <- reactiveVal(NULL)
   rv_state_code <- reactiveVal(NULL)
   
+  # --- ADD THESE NEW REACTIVEVALS FOR REAL-TIME DATA ---
+  rv_realtime_conditions <- reactiveVal(NULL)
+  rv_realtime_station <- reactiveVal(NULL)
+  
   # --- ADD THIS NEW REACTIVEVAL ---
   rv_narrative_forecast <- reactiveVal(NULL)
   rv_fire_discussion <- reactiveVal(NULL)
@@ -1203,6 +1321,20 @@ server <- function(input, output, session) {
       return()
     }
     
+    # --- START: NEW REAL-TIME DATA FETCH ---
+    # Fetch real-time conditions from the nearest airport station
+    realtime_results <- get_realtime_conditions(geo_location$lat, geo_location$long)
+    if (!is.null(realtime_results)) {
+      rv_realtime_conditions(realtime_results$data)
+      rv_realtime_station(realtime_results$station)
+      showNotification("Real-time observation loaded.", type = "message", duration = 3)
+    } else {
+      showNotification("Could not load real-time observation.", type = "warning")
+      rv_realtime_conditions(NULL) # Clear old data
+      rv_realtime_station(NULL)
+    }
+    # --- END: NEW REAL-TIME DATA FETCH ---
+    
     # Fetch forecast
     forecast_results <- get_prescribed_burn_forecast(
       geo_location$lat, 
@@ -1217,6 +1349,10 @@ server <- function(input, output, session) {
     
     # Check if the forecast part of the results is valid AND contains data
     if (is.data.frame(forecast_results$forecast) && nrow(forecast_results$forecast) > 0) {
+      
+      # This new line filters the forecast to only include hours from the current time forward.
+      forecast_results$forecast <- forecast_results$forecast %>% filter(time >= Sys.time())
+      
       # SUCCESS: Store all the new data
       rv_forecast_data(forecast_results$forecast)
       rv_nws_office(forecast_results$nws_office)
@@ -1295,54 +1431,56 @@ server <- function(input, output, session) {
   
   # Current Conditions UI
   output$current_conditions_ui <- renderUI({
-    df <- rv_forecast_data()
+    # --- MODIFIED: Use both real-time and forecast data ---
+    realtime_df <- rv_realtime_conditions()
+    forecast_df <- rv_forecast_data()
+    station_info <- rv_realtime_station()
     
-    if (is.null(df) || nrow(df) == 0) {
+    # Require both data sources to be available before rendering
+    req(realtime_df, forecast_df, station_info)
+    
+    if (nrow(realtime_df) == 0 || nrow(forecast_df) == 0) {
       return(p("Enter a location and click 'Get Forecast' to begin."))
     }
     
-    current <- df[1, ]
+    # Get the single row of real-time data
+    current_obs <- realtime_df[1, ]
+    # Get the first hour of forecast data (for VI)
+    current_fcst <- forecast_df[1, ]
     
     # Create status boxes
     create_info_box <- function(title, value, unit, min_val = NULL, max_val = NULL) {
-      # --- NA Check for safety ---
       if(is.na(value)) {
-        # Use a valid color like "blue" for the infoBox
         return(infoBox(title, "N/A", icon = icon("question-circle"), color = "blue"))
       }
-      
-      in_range <- if (!is.null(min_val) && !is.null(max_val)) {
-        value >= min_val && value <= max_val
-      } else {
-        TRUE
-      }
-      
+      in_range <- if (!is.null(min_val) && !is.null(max_val)) { value >= min_val && value <= max_val } else { TRUE }
       color <- if (in_range) "green" else "red"
       icon_name <- if (in_range) "check" else "times"
-      
-      # Format the value for display AFTER the logical comparison
       display_value <- if (value > 1000) format(value, big.mark = ",") else value
-      
-      infoBox(
-        title = title,
-        value = paste(display_value, unit),
-        icon = icon(icon_name),
-        color = color,
-        width = 3
-      )
+      infoBox(title = title, value = paste(display_value, unit), icon = icon(icon_name), color = color, width = 3)
     }
     
-    fluidRow(
-      create_info_box("Temperature", current$temp, "°F", 
-                      input$temp_slider[1], input$temp_slider[2]),
-      create_info_box("Humidity", current$humidity, "%", 
-                      input$rh_slider[1], input$rh_slider[2]),
-      create_info_box("Wind Speed", current$wind_speed, "mph", 
-                      input$wind_slider[1], input$wind_slider[2]),
-      # Pass the raw numeric value for the logical check
-      create_info_box("Ventilation Index", 
-                      current$ventilation_index, "", 
-                      input$vi_slider, Inf)
+    # --- UI OUTPUT ---
+    tagList(
+      # New row to display which station is providing the real-time data
+      fluidRow(
+        column(12,
+               div(style = "text-align: right; font-size: 0.9em; color: #6c757d; padding-right: 15px; margin-bottom: 10px;",
+                   paste0("Real-time surface conditions from station: ", 
+                          station_info$name, " (", station_info$id, ")")
+               )
+        )
+      ),
+      # Existing row for the info boxes
+      fluidRow(
+        # These three pull from the REAL-TIME observation
+        create_info_box("Temperature", current_obs$temp, "°F", input$temp_slider[1], input$temp_slider[2]),
+        create_info_box("Humidity", current_obs$humidity, "%", input$rh_slider[1], input$rh_slider[2]),
+        create_info_box("Wind Speed", current_obs$wind_speed, "mph", input$wind_slider[1], input$wind_slider[2]),
+        
+        # This one still pulls from the NWS FORECAST, as it's not an observed parameter
+        create_info_box("Ventilation Index", current_fcst$ventilation_index, "", input$vi_slider, Inf)
+      )
     )
   })
   
