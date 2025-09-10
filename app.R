@@ -750,13 +750,17 @@ get_prescribed_burn_forecast <- function(lat, lon, days_since_rain_input, locati
       return(dirs[round(deg / 22.5) + 1])
     }
     
+    # Find this block within the get_prescribed_burn_forecast function
     final_df <- master_df %>%
       mutate(
         temp = round((temp_c * 9/5) + 32, 0),
-        # --- FIX 2: Use the correct conversion factor for km/h to mph ---
         wind_speed = round(wind_speed_kmh * 0.621371, 0),
         wind_gust = if ("wind_gust_kmh" %in% names(.)) round(wind_gust_kmh * 0.621371, 0) else NA_real_,
         wind_dir = sapply(wind_dir_deg, degrees_to_cardinal),
+        # --- START CHANGE 1: ADD THIS LINE ---
+        # Convert transport wind direction from degrees to cardinal letters (N, SW, etc.)
+        transport_wind_dir_cardinal = sapply(transport_wind_dir, degrees_to_cardinal),
+        # --- END CHANGE 1 ---
         mixing_height_ft = round(mixing_height_m * 3.28084, 0),
         transport_wind_mph = round(transport_wind_kts * 1.15078, 1),
         transport_wind_ms = round(transport_wind_mph * 0.44704, 0),
@@ -790,14 +794,17 @@ get_prescribed_burn_forecast <- function(lat, lon, days_since_rain_input, locati
         ignition_prob = calculate_ignition_probability(temp, humidity, fuel_moisture_one_hr),
         day_label = format(local_time, "%a %m/%d")
       ) %>%
+      # --- START CHANGE 2: MODIFY THE 'select' STATEMENT ---
+      # Add the new 'transport_wind_dir_cardinal' column to the final data frame
       select(
         time = local_time, temp, humidity, wind_speed, any_of("wind_gust"), wind_dir,
         any_of("sky_cover"), weather_code, mixing_height_m, mixing_height_ft,
-        transport_wind_mph, transport_wind_ms, any_of("transport_wind_dir"),
+        transport_wind_mph, transport_wind_ms, transport_wind_dir_cardinal, # <-- ADDED THIS
         ventilation_index, any_of("haines_index"), kbdi_trend, ffmc, fuel_moisture_one_hr,
         ignition_prob, dispersion_category, dispersion_description,
         dispersion_adjusted_vi, burn_quality, burn_score, hour_of_day, day_label
       ) %>%
+      # --- END CHANGE 2 ---
       filter(!is.na(temp)) %>%
       head(72)
     
@@ -1506,27 +1513,30 @@ server <- function(input, output, session) {
     current <- df[1, ]
     
     tags$div(
+      # Top section for primary atmospheric conditions
+      tags$p(strong("Surface Wind (20ft):"), sprintf(" %s mph from the %s", current$wind_speed, current$wind_dir)),
+      tags$p(strong("Transport Wind:"), sprintf(" %.1f mph from the %s", current$transport_wind_mph, current$transport_wind_dir_cardinal)),
+      tags$p(strong("Mixing Height:"), sprintf(" %s ft", format(current$mixing_height_ft, big.mark = ","))),
+      
+      if ("haines_index" %in% names(current) && !is.na(current$haines_index)) {
+        tags$p(strong("Haines Index:"), sprintf(" %d", current$haines_index),
+               if (current$haines_index >= 5) tags$span(" (Unstable)", style = "color: orange;"))
+      },
+      
+      # Separator
+      hr(), 
+      
+      # Bottom section for calculated fire behavior indices
       tags$p(strong("KBDI Trend:"), sprintf(" %d", current$kbdi_trend),
              if (current$kbdi_trend > 150) tags$span(" (Very Dry)", style = "color: red;")),
       tags$p(strong("Fine Fuel Moisture:"), sprintf(" %.1f", current$ffmc),
              if (current$ffmc > 85) tags$span(" (High Fire Risk)", style = "color: red;")),
-      
-      # ADD THESE NEW DISPLAYS
       tags$p(strong("1-Hr Fuel Moisture:"), sprintf(" %.1f%%", current$fuel_moisture_one_hr),
              if (current$fuel_moisture_one_hr < 6) tags$span(" (Critical)", style = "color: red;")),
       tags$p(strong("Ignition Probability:"), sprintf(" %d%%", current$ignition_prob),
              if (current$ignition_prob > 70) tags$span(" (High)", style = "color: orange;")),
       tags$p(strong("Smoke Dispersion:"), sprintf(" %s", current$dispersion_category),
-             tags$span(sprintf(" (%s)", current$dispersion_description), style = "font-size: 0.9em; color: gray;")),
-      
-      # Existing code continues...
-      hr(), # Add a separator for clarity
-      tags$p(strong("Mixing Height:"), sprintf(" %s ft", format(current$mixing_height_ft, big.mark = ","))),
-      tags$p(strong("Transport Wind:"), sprintf(" %.1f mph", current$transport_wind_mph)),
-      if ("haines_index" %in% names(current) && !is.na(current$haines_index)) {
-        tags$p(strong("Haines Index:"), sprintf(" %d", current$haines_index),
-               if (current$haines_index >= 5) tags$span(" (Unstable)", style = "color: orange;"))
-      }
+             tags$span(sprintf(" (%s)", current$dispersion_description), style = "font-size: 0.9em; color: gray;"))
     )
   })
   
@@ -1711,18 +1721,22 @@ server <- function(input, output, session) {
     if (is.null(df) || nrow(df) == 0) return(NULL)
     
     df %>%
+      # --- START: MODIFIED 'select' STATEMENT ---
       select(
         Time = time, `Temp (°F)` = temp, `Humidity (%)` = humidity, `Wind (mph)` = wind_speed,
         `Gust (mph)` = any_of("wind_gust"), `Wind Dir` = wind_dir, `Sky Cover (%)` = any_of("sky_cover"),
-        `Weather` = weather_code, `Mix Hgt (m)` = mixing_height_m, # <-- USES METERS DIRECTLY
-        `Trans Wind (mph)` = transport_wind_mph, `Trans Wind (m/s)` = transport_wind_ms,
+        `Weather` = weather_code, `Mix Hgt (m)` = mixing_height_m, 
+        `Trans Wind (mph)` = transport_wind_mph, 
+        `Trans Wind Dir` = transport_wind_dir_cardinal, # <-- ADDED THIS COLUMN
         `Burn Quality` = burn_quality
       ) %>%
+      # --- END: MODIFIED 'select' STATEMENT ---
       DT::datatable(options = list(
         pageLength = 12, scrollX = TRUE,
         rowCallback = JS(
           "function(row, data) {",
-          "  var quality = data[data.length - 1];",
+          # This line below needs to be updated to account for the new column
+          "  var quality = data[data.length - 1];", # JavaScript index is 0-based
           "  if(quality == 'Excellent') $(row).css('background-color', '#d4edda');",
           "  else if(quality == 'Good') $(row).css('background-color', '#e7f5e7');",
           "  else if(quality == 'Fair') $(row).css('background-color', '#fff3cd');",
@@ -1738,7 +1752,6 @@ server <- function(input, output, session) {
     df <- rv_forecast_data()
     if (is.null(df) || nrow(df) == 0) return(NULL)
     
-    # --- STEP 1: Filter first to see if ANY hours meet the strict criteria ---
     df_filtered <- df %>%
       mutate(
         temp_ok = temp >= input$temp_slider[1] & temp <= input$temp_slider[2],
@@ -1750,28 +1763,30 @@ server <- function(input, output, session) {
       filter(all_params_ok,
              hour_of_day >= 10 & hour_of_day <= 16)
     
-    # --- STEP 2: Only summarise the data IF there are rows to process ---
     if (nrow(df_filtered) > 0) {
       df_optimal <- df_filtered %>%
         group_by(day_label) %>%
+        # --- START: MODIFIED 'summarise' BLOCK ---
         summarise(
           start_time = min(time),
           end_time = max(time),
           avg_temp = round(mean(temp), 0),
           avg_humidity = round(mean(humidity), 0),
           avg_wind = round(mean(wind_speed), 1),
+          # This helper function finds the most common wind direction in the window
+          prevailing_wind_dir = names(which.max(table(wind_dir))),
+          prevailing_trans_wind_dir = names(which.max(table(transport_wind_dir_cardinal))),
           avg_vi = round(mean(ventilation_index), 0),
           avg_dispersion = first(dispersion_category),
           hours = n(),
           .groups = 'drop'
         ) %>%
-        filter(hours >= 2) # At least 2 consecutive good hours
+        # --- END: MODIFIED 'summarise' BLOCK ---
+        filter(hours >= 2) 
     } else {
-      # If no rows passed the filter, create an empty tibble to prevent errors
       df_optimal <- tibble()
     }
     
-    # This final check now works perfectly without any warnings being generated
     if (is.null(df_optimal) || nrow(df_optimal) == 0) {
       return(
         div(
@@ -1788,7 +1803,7 @@ server <- function(input, output, session) {
       )
     }
     
-    # This part for displaying found windows remains the same
+    # --- START: MODIFIED UI OUTPUT BLOCK ---
     window_boxes <- lapply(1:nrow(df_optimal), function(i) {
       window <- df_optimal[i, ]
       div(
@@ -1798,14 +1813,19 @@ server <- function(input, output, session) {
           format(window$start_time, "%I:%M %p"), " - ", 
           format(window$end_time, "%I:%M %p"),
           " (", window$hours, " hours)"),
-        p(strong("Conditions: "),
+        p(strong("Avg. Conditions: "),
           "Temp: ", window$avg_temp, "°F | ",
           "RH: ", window$avg_humidity, "% | ",
-          "Wind: ", window$avg_wind, " mph | ",
           "VI: ", format(window$avg_vi, big.mark = ",")),
+        # This new paragraph displays the prevailing winds
+        p(strong("Prevailing Winds: "),
+          "Surface: ", window$avg_wind, " mph from ", window$prevailing_wind_dir, " | ",
+          "Transport from ", window$prevailing_trans_wind_dir
+        ),
         p(strong("Smoke Dispersion: "), window$avg_dispersion)
       )
     })
+    # --- END: MODIFIED UI OUTPUT BLOCK ---
     
     do.call(tagList, window_boxes)
   })
